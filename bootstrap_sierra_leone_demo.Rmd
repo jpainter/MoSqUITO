@@ -1,0 +1,874 @@
+---
+title: "Distill DHIS2 into local instance"
+author: "JP"
+date: "June, 2019"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+editor_options: 
+  chunk_output_type: console
+params:
+  origin: Sierra Leone Demo
+  origin_login_file: sierra leone
+  destination_login_file: local_sierra
+  cache: FALSE
+---
+
+# Setup 
+
+load libraries...
+
+```{r packages, echo = TRUE, results='hold', message=FALSE }
+
+# list of required packages
+    package.list = c("rlist", "knitr", "kableExtra", "xts", "leaflet", "RColorBrewer", "DT", "dygraphs", "httr", "jsonlite", "XML", "assertthat", "lubridate", "scales", "RcppRoll", "zoo", "gridExtra", "futile.logger", "tidyverse" )
+
+# Function to test if package is installed 
+    pkgTest <- function( package.list = package.list ){
+        
+        missing.packages = setdiff( package.list , rownames(installed.packages())) 
+        if ( length( missing.packages ) > 0 ) install.packages( missing.packages ) 
+    }
+
+
+# Test if packages loaded
+    pkgTest( package.list )
+
+# load the packages
+    lapply( package.list, suppressMessages( require ) , character.only = TRUE)
+
+
+knitr::opts_chunk$set( echo = params$echo ,
+                       fig.width =  8, 
+                       # knitr.table.format = "html" ,
+                       cache = params$cache # TRUE for testing; FALSE for production
+                       )
+
+```
+
+...functions for fetching metadata
+
+```{r sources }
+source('dhis2-data-munging/bootstrap/bootstrap_functions.R')
+
+source('dhis2_functions.R')
+
+origin.folder = paste0( params$origin , "/"  )
+
+
+
+ # login shortcuts
+login_destination = function(){
+    source( 
+    paste0( origin.folder, 
+            tolower( params$destination_login_file ) , "_login" )
+    )
+
+  loginDHIS2( baseurl, username, password)
+}
+
+
+```
+
+
+Copy the script docker-compose.yaml into its own directory and then calling `docker-compose up --build`. NB: set port so that it does not conflict with other dhis2 instances (e.g. 8091)
+
+- takes about 5 minutes
+
+# Load All origin metadata (assuming that previously downloaded)
+
+
+```{r all_meta }
+
+  meta_data_file = paste0( params$origin , "/" ,
+                           params$origin , "_metadata.rds" ) 
+
+  if ( file.exists( meta_data_file) ){
+   
+
+       md = read_rds( meta_data_file )
+  }
+
+  # re-order alaphabetically to be easier to browse in View
+  md = md[order(names(md))]
+  
+  # Retrieve access data 
+  date_metadata = file.info( meta_data_file )$ctime 
+  
+```
+
+Metadata downoloaded on `r format( date_metadata , '%d-%B-%Y' )
+
+
+# Organization units
+
+```{r import_ou_md }
+
+  md.ou =  md$organisationUnits
+
+  # glimpse( md.ou )
+
+  # check for duplicate
+  # sum( duplicated( md.ou$id ) )
+  
+  # get login credentials from text file
+  login_destination()
+  
+  url <- paste0( baseurl , 
+                 "api/metadata?importStrategy=CREATE_AND_UPDATE&atomicMode=NONE"
+                 )
+  
+  ous = list(
+    created = as.character(Sys.Date()) ,
+    organisationUnits = md.ou
+  )
+  
+  post( url, ous )
+
+```
+
+## Check for ou that were ignored when importing and are now missing from destination server
+
+```{r}
+ # get login credentials from text file
+  login_destination()
+
+  url <- paste0( baseurl, "api/organisationUnits?paging=false")
+
+  ous_dest <- get(url)
+
+# compare origin and destination for OU
+  if ( length(ous_dest$organisationUnits) > 0 ){
+    
+    missing = anti_join( md.ou[, !names(md.ou) %in% 'parent' ] , 
+                         ous_dest$organisationUnits , 
+                         by = "id"
+                         )
+    
+    glimpse(missing)
+  }
+  
+  
+```
+
+OrgUnits: `r nrow( ous_dest$organisationUnits ) %>% comma ` of `r nrow(md.ou[, !names(md.ou) %in% 'parent' ]) %>% comma ` were imported.
+
+## Organisation unit levels
+
+```{r import_ouLevels_md }
+
+  url <- paste0( baseurl , 
+                 "api/metadata?importStrategy=CREATE_AND_UPDATE&atomicMode=NONE"
+                 )
+
+  # get login credentials from text file
+  login_destination()
+  
+  md.ouLevels =  md$organisationUnitLevels %>%
+    arrange( level )
+
+
+  ouLevels = list(
+    created = as.character(Sys.Date()) ,
+    organisationUnitLevels = md.ouLevels
+  )
+  
+  post( url, ouLevels )
+
+```
+
+## Organisation unit groups   
+
+  - private / public
+  - elimination / control 
+  
+  
+# Categories
+
+## Import category Options from Metatdata 
+
+As with data elements and data groups, need to import the category options first.
+
+```{r importCategoryOptions}
+
+  md.catOpts = md$categoryOptions
+
+  glimpse( md.catOpts )
+  
+  # check for missing values
+  map( md.catOpts, ~sum(is.na(.x)) )
+  
+  # check for duplicated values
+  map( md.catOpts, ~sum(duplicated(.x)) )
+ 
+  # Change any with name is dafault--seems like will not import 'default'
+  name_is_default = md.catOpts$name %in% 'default'
+  # see row num 1265
+  md.catOpts[ name_is_default , c('name', "shortName") ] = "default_"
+  
+  # get login credentials from text file
+  login_destination()
+  
+  url <- paste0( baseurl , 
+                 "api/metadata?importStrategy=CREATE_AND_UPDATE&atomicMode=NONE"
+                 )
+  
+  post( url, list( categoryOptions = md.catOpts ) )
+ 
+  # check if all values imported
+  url <- paste0( baseurl, "api/categoryOptions?paging=false")
+
+  catOpts_dest <- get(url)
+  
+  # glimpse( catOpts_dest[[1]] )
+  
+  # NB:  May be false if had to add 'default' category
+  nrow(catOpts_dest[[1]]) == nrow( md.catOpts) 
+  
+    
+```
+
+
+## Import categories from Metatdata 
+
+
+```{r importCategories}
+
+  md.cats = md$categories
+  
+  # glimpse( md.cats )
+
+    # check for missing values
+  map( md.cats, ~sum(is.na(.x)) )
+  
+  # check for duplicated values
+  map( md.cats, ~sum(duplicated(.x)) )
+ 
+  # Change any with name is dafault--seems like will not import 'default'
+  name_is_default = md.cats$name %in% 'default'
+  # see row num 1265
+  md.cats[ name_is_default , c('name', "shortName") ] = "default_"
+  
+  
+  md.cats$code = md.cats$id 
+  
+  glimpse( md.cats[1,] )
+  
+
+  # get login credentials from text file
+  login_destination()
+  
+  url <- paste0( baseurl , 
+                 "api/metadata?importStrategy=CREATE_AND_UPDATE&atomicMode=NONE"
+                 )
+  
+  # NB : there is some problem with first category??? import fails when included
+  # could be because of user..Access or translations.  see 
+  #  View(md.cats[1:2,])
+  
+  cols = names( md.cats )[ !grepl( 'user', names(md.cats), ignore.case = TRUE ) ]
+ 
+  cats.list = list( categories = md.cats[ , cols] ) 
+
+  post( url, cats.list )
+  
+  
+ 
+  # check if all values imported
+  url <- paste0( baseurl, "api/categories?paging=false")
+
+  cats_dest <- get(url)
+  
+  # glimpse( catOpts_dest[[1]] )
+  
+  nrow(cats_dest[[1]]) == nrow( md.cats) 
+  
+ 
+```
+
+
+## Import category Combinations from Metatdata 
+
+```{r importCategoryCombos}
+
+  md.catCombos = md$categoryCombos
+  
+  # glimpse( md.catCombos )
+  
+  # check for missing values
+  # map( md.catCombos, ~sum(is.na(.x)) )
+  
+  # replace NA with id
+  # md.catCombos$code =  md.catCombos$id 
+  
+  # Change any with name is dafault--seems like will not import 'default'
+  name_is_default = md.catCombos$name %in% 'default'
+  
+  # see row num 1265
+  md.catCombos[ name_is_default , c('name') ] = "default_"
+  
+  catco.list = list( categoryCombos = md.catCombos  )
+  
+  # glimpse( catco.list )
+  
+  # get login credentials from text file
+  login_destination()
+  
+  url <- paste0( baseurl , 
+                 "api/metadata?importStrategy=CREATE_AND_UPDATE&atomicMode=NONE"
+                 )
+  
+  post( url, catco.list )
+  
+  # check if all values imported
+  url <- paste0( baseurl, "api/categoryCombos?paging=false")
+
+  catCombos_dest <- get(url)
+  
+  # glimpse( catCombos_dest[[1]] )
+  
+  nrow( catCombos_dest[[1]] ) == nrow( md.catCombos ) 
+  
+  which( !md.catCombos$id %in% catCombos_dest[[1]]$id )
+  which( !catCombos_dest[[1]]$id  %in% md.catCombos$id )
+  
+```
+
+## Category Option Combos from Metatdata 
+
+```{r importCategoryOptionCombos}
+
+  md.caOptCombos = md$categoryOptionCombos
+  
+  # NB categoryOptions were all empty and caused import fail
+
+  # glimpse( md.caOptCombos )
+  
+  # check for missing
+  # map( md.caOptCombos, ~sum(is.na(.x)) )
+  
+ # Change any with name is dafault--seems like will not import 'default'
+  name_is_default = md.caOptCombos$name %in% 'default'
+  # see row num 1265
+  md.caOptCombos[ name_is_default , c('name') ] = "default_"
+  
+  # Add publicAccess (not in KE metadata but is in 2.28)
+  md.caOptCombos$publicAccess = NA
+  
+  # glimpse( md.caOptCombos )
+  
+  cocs = list( categoryOptionCombos = md.caOptCombos )
+  
+  # glimpse( cocs )
+  
+  # get login credentials from text file
+  login_destination()
+  
+  url <- paste0( baseurl , 
+                 "api/metadata?importStrategy=CREATE_AND_UPDATE&atomicMode=NONE"
+                 )
+  
+  post( url, cocs )
+  
+  # check if all values imported
+  url <- paste0( baseurl, "api/categoryOptionCombos?paging=false")
+
+  catOptionCombos_dest <- get(url)
+  
+  # glimpse( catCombos_dest[[1]] )
+  
+  nrow( catOptionCombos_dest[[1]] ) == nrow( md.caOptCombos) 
+
+```
+
+
+# Data Elements 
+
+```{r dataElements}
+
+  md.de = md$dataElements
+
+  # glimpse(md.de)
+  
+  map( md.de, ~sum(is.na(.x)) )
+  
+  # replace NA with ''
+  md.de$code = md.de$id 
+  
+  # glimpse( md.de )
+  
+  #  filter to those with data to import 
+  data.file = ( "Sierra Leone Demo/Sierra Leone Demo_details.rds"  )
+
+  data = read_rds( data.file )
+ 
+  data.ids = unique( data$dataElement )
+  
+  mal_de =  md.de[ mal_de$id %in% data.ids, ] 
+  
+  malde =  md.de %>% filter( id %in% data.ids) 
+    
+ 
+   # get login credentials from text file
+  login_destination()
+  
+  url <- paste0( baseurl , 
+                 "api/metadata?importStrategy=CREATE_AND_UPDATE&atomicMode=NONE"
+                 )
+  # post( url, list( dataElements = de_list ) )
+  
+  # NB: for some reason, mal_de[2, ] will not import. 'user' columns??
+  # View( mal_de[1:2, ])
+  cols = names( mal_de )[ !grepl( 'user', names(mal_de), ignore.case = TRUE ) ]
+  de.list = list( dataElements = mal_de[  , cols] )
+  
+  # SL having problem with md.de[1120:1150,] maybe because aggregationType is AVERAGE_SUM_ORG_UNIT
+  # glimpse( de.list )
+
+  post( url, de.list ) 
+  
+```
+
+# Data Element Groups 
+
+Get the groups and selected only those of interest.  Wait to import after importing data elements so that the data elements are associated with the group.
+  
+```{r dataElementGroups }
+
+  md.degrp = md$dataElementGroups
+
+  # names( md.degrp )
+  
+  # glimpse(md.degrp)
+  
+  # get list of de in the choosen de groups
+  md.degrp = md$dataElementGroups
+  mal_des =  md.degrp %>% select( id, name ) %>%
+    filter( grepl( "malaria" , name , ignore.case = TRUE ))
+    
+
+  # map( md.degrp, ~sum(is.na(.x)) ) %>% t %>% kable
+  
+    
+  ## convert list to d.f.
+  # deg_list <- list()
+  # for (i in 1:nrow( md.degrp. )){
+  #   deg  <-  list( name = md.degrp.$name[i] ,
+  #                 code = md.degrp.$code[i] ,
+  #                 shortName = md.degrp.$shortName[i] ,
+  #                 id = md.degrp.$id[i] ,
+  #                 dataElements = data.frame(
+  #                   id = md.degrp.[i,]$dataElements
+  #                 )
+  #   )
+  # 
+  #   deg_list <- list.append( deg_list, deg )
+  # }
+  
+  # glimpse( deg_list )
+  
+  # get login credentials from text file
+  login_destination()
+  
+  url <- paste0( baseurl , 
+                 "api/metadata?importStrategy=CREATE_AND_UPDATE&atomicMode=NONE"
+                 )
+  
+  degrp.list = list( dataElementGroups = md.degrp %>% filter( id %in% mal_des$id ) )
+  
+  post( url, degrp.list )
+
+  
+```
+
+
+# Datasets
+
+TODO:  Not working.  Returns 
+  created updated deleted ignored total
+       0       0       0       0     0
+       
+    - is there a missing required value?  eg.userAccesses
+    
+```{r datasets , eval=FALSE}
+
+ login_destination()
+ url <- paste0( baseurl , 
+                 "api/metadata?importStrategy=CREATE_AND_UPDATE&atomicMode=NONE"
+                 )
+
+  md.ds = md$dataSets
+  
+  dataSets.list = list( dataSets = md.ds[1 , ] )
+
+  post( url, dataSets.list )
+
+
+  # check if all values imported
+  url <- paste0( baseurl, "api/dataSets?paging=false")
+
+  dataSets_dest <- get( url )
+  
+  # glimpse( catCombos_dest[[1]] )
+  
+  nrow( dataSets_dest[[1]] ) == nrow( md$dataSets ) 
+  
+```
+
+# Indicators
+
+```{r indicatorTypes}
+  
+  md.indType = md$indicatorTypes
+  
+  # glimpse(md.indType)
+  
+  map( md.indType, ~sum(is.na(.x)) )
+
+  indTypes = list( indicatorTypes = md.indType )
+   
+  # get login credentials from text file
+  login_destination()
+  
+  url <- paste0( baseurl , 
+                 "api/metadata?importStrategy=CREATE_AND_UPDATE&atomicMode=NONE"
+                 )
+  
+  post( url, indTypes ) 
+
+```
+
+
+```{r indicatorGroups, eval=FALSE}
+
+ md.indGrp = md$indicatorGroups
+  
+  # glimpse(md.indGrp)
+  
+  map( md.indGrp, ~sum(is.na(.x)) )
+  
+  
+    # Filter to malaria relevent groups
+    search_hits = (
+    grepl("malaria", md.indGrp$name, ignore.case = TRUE) |
+      grepl("Pop", md.indGrp$name, ignore.case = TRUE ) |
+      grepl("patient", md.indGrp$name, ignore.case = TRUE ) |
+      grepl("idsr", md.indGrp$name, ignore.case = TRUE ) |
+      grepl("antenatal", md.indGrp$name, ignore.case = TRUE )
+    ) 
+    
+    md.indGrp. = md.indGrp[ search_hits , ]
+    
+    glimpse( md.indGrp. )
+    
+    
+    cols = names( md.indGrp. )[ !grepl( 'user', names(md.indGrp.), ignore.case = TRUE ) ]
+ 
+    
+    list.indGrp = list( indicatorGroups = md.indGrp.[ , cols] )
+    
+    post( url, list.indGrp  )
+
+```
+
+
+
+```{r indicators}
+ 
+  md.inds = md$indicators
+  
+  # glimpse(md.indGrp)
+  
+  map( md.inds, ~sum(is.na(.x)) )
+  
+  
+    # Filter to malaria relevent groups
+    search_hits = (
+    grepl("malaria", md.inds$name, ignore.case = TRUE) |
+      grepl("Pop", md.inds$name, ignore.case = TRUE ) |
+      grepl("patient", md.inds$name, ignore.case = TRUE ) |
+      grepl("idsr", md.inds$name, ignore.case = TRUE ) |
+      grepl("antenatal", md.inds$name, ignore.case = TRUE )
+    ) 
+    
+    md.inds. = md.inds[ which(search_hits) , ]
+    
+    # glimpse( md.inds. )
+    
+    cols = names( md.inds. )[ !grepl( 'user', names(md.inds.), ignore.case = TRUE ) ]
+    
+    list.inds = list( indicators = md.inds.[ , cols])
+    
+    post( url, list.inds )
+    
+```
+
+
+```{r indicatorGroupSets}
+  
+  md.indGrpSet = md$indicatorGroupSets
+
+  # glimpse(md.indGrpSet)
+  
+  map( md.indGrpSet, ~sum(is.na(.x)) )
+
+  list.indGrpSet = list( indicatorGroupSets = md.indGrpSet )
+   
+  # get login credentials from text file
+  login_destination()
+  
+  url <- paste0( baseurl , 
+                 "api/metadata?importStrategy=CREATE_AND_UPDATE&atomicMode=NONE"
+                 )
+  
+  post( url, list.indGrpSet ) 
+
+```
+
+
+# Users 
+
+## Set your user's organisation unit
+
+- We need to set the organisation unit of our user, otherwise, the system will complain. 
+- We can get our current user information, and assign it to the `Global` organisation unit.
+- After that, `POST` the metadata back and request that it be updated.
+
+```{r global_user   }
+
+  # get login credentials from text file
+  login_destination()
+
+  topLevel = map_lgl( md$organisationUnits$path ,
+                      ~length(gregexpr( "/", .x , fixed = TRUE )[[1]] )==1
+  )
+  
+  global_uid = md$organisationUnits$id[ topLevel ] %>% gsub(" ", "_", .)
+      
+
+  #We want to be a global user
+  url <- paste0(baseurl,"api/me")
+  me <- get(url)
+  
+  url <- paste0( baseurl,"api/users/", me$id )
+  me <- get(url)
+  me$organisationUnits <- list( list( id = global_uid) )
+  
+  url<-paste0( baseurl, "api/metadata?importStrategy=UPDATE" )
+  post(url, list( users=list(me) ) )
+
+```
+
+## Create a data entry user role
+
+- There is a **LONG** list of [user authorities](https://docs.dhis2.org/2.25/en/user/html/apa.html)
+- Their function is not entirely clear or documented. 
+- Experimentation may be the best way!
+- For this example, we will use XML instead of JSON. 
+
+
+```{r data_entry_role   }
+set.seed(99377721)
+
+userRole_UID <- generateUID()
+
+dxf<-newXMLDoc()
+
+metadata <- newXMLNode("metadata", 
+                       namespaceDefinitions = "http://dhis2.org/schema/dxf/2.0" , 
+                       doc=dxf
+                       )
+userRoles<-newXMLNode( "userRoles", parent=metadata ) 
+
+attribs <- c( name="Data entry clerk", id = userRole_UID )
+userRole <- newXMLNode("userRole", attrs = attribs , parent = userRoles )
+
+authorities<-newXMLNode( "authorities", parent = userRole)
+authorities_list <- c( "F_DATAVALUE_DELETE", 
+                       "M_dhis-web-dataentry",
+                       "M_dhis-web-mapping",
+                       "M_dhis-web-validationrule",
+                       "F_RUN_VALIDATION",
+                       "M_dhis-web-dashboard-integration",
+                       "F_DATAVALUE_ADD",
+                       "M_dhis-web-visualizer")
+
+for ( i in 1:length(authorities_list)) {
+  authority <- newXMLNode( "authority" , 
+                           authorities_list[i],  
+                           parent=authorities)
+  }
+
+# dxf
+
+  url <- paste0(baseurl,"api/metadata")
+  r <- POST( url, body = as( dxf, "character" ), content_type_xml() )
+  
+  assert_that(r$status_code == 200L)
+  
+```
+
+# load data file with ou, data elements, categories, period, and values
+
+
+```{r}
+data.file = ( "Sierra Leone Demo/Sierra Leone Demo_details.rds"  )
+
+data = read_rds( data.file )
+
+glimpse( data )
+
+```
+
+
+```{r import_data_select, echo = TRUE }
+
+d_out <- data %>% as_tibble %>%
+  # filter( level == 6 ) %>% # pick level
+  select( dataElement, period, orgUnit, categoryOptionCombo , value ) %>%
+  mutate( value = as.character( as.integer( value )) )
+  
+glimpse(d_out)
+
+```
+
+
+- After getting the data into shape, import it.
+
+```{r import_data , echo = TRUE}
+
+  # login in to destination server
+  source( paste0( "Sierra Leone/",
+          tolower( params$destination_login_file ) , "_login")  
+          )
+  loginDHIS2( baseurl, username, password)
+  
+
+ #Import the data, skipping checks for existing values
+  url <- paste0( baseurl,
+                 "api/dataValueSets?preheatCache=false&skipExistingCheck=true" )
+  
+# Import month by month
+  periods = unique( data$period ) 
+  periods = periods[ order( periods )]
+  
+for ( i in seq_along(periods) ){
+  
+  print( paste( periods[i] ) )
+  
+  d_out = data %>% 
+    filter( period %in% periods[i] ) 
+  
+  p = POST( url, 
+              body = toJSON( list( dataValues = d_out ) ,
+                             auto_unbox = TRUE ) ,
+              content_type_json()
+    )
+  
+  # stop if did not import successfully
+  status = fromJSON(content(p, "text" ))$description
+  if ( !status %in% "Import process completed successfully" ){
+    print( 'Import error')
+    break
+  } 
+  
+  # results
+  print( fromJSON(content(p, "text" ))$importCount %>% data.frame() ) 
+}
+
+  
+```
+
+
+# Trigger analytics
+
+
+```{r trigger_analytics }
+
+loginDHIS2( baseurl, username, password)
+
+  url <- paste0(baseurl, "/api/26/resourceTables/analytics" ) 
+  r <- POST(url)
+  assert_that (r$status_code == 200L )
+```
+
+
+```{r waiting_to_finish , echo = FALSE, results = 'hide' }
+
+## Warning--'connection refused' happens here sometimes.  Why???
+
+completed <- FALSE
+while ( completed == FALSE ) { 
+  
+  Sys.sleep(5)
+  
+  r = get( paste0(baseurl,"api/system/tasks/ANALYTICS_TABLE"), flatten = TRUE )
+  
+  cat("Not done yet...please wait.")
+  
+  completed <- r[ 1, "completed" ] 
+  
+}
+
+print("Done")
+
+```
+
+
+# Summary
+
+## What did we end up with?
+
+- Lets compare *Total of new and relapse cases and cases with unknown previous TB treatment history* between South Africa and Sierra Leone.
+
+```{r echo = TRUE}
+
+  #Period dimensions
+  periods = date_code()
+  
+  #Data element dimension
+  ele = "Lt0FqtnHraW.lHl2rmXpHse;Lt0FqtnHraW.SeDaCnHi3m5;OoakJhWiyZp.lHl2rmXpHse;OoakJhWiyZp.SeDaCnHi3m5"
+  
+  #Assemble the URL
+    url <- paste0( baseurl, "api/analytics/dataValueSet.json?" ,
+                  "dimension=ou:", "LEVEL-1" ,
+                  "&dimension=pe:", periods ,
+                  "&dimension=dx:",ele ,
+                  "&outputIdScheme=NAME" )
+   
+    extract  <- get(url)[[1]] 
+    
+    glimpse( extract )
+    
+    data = extract %>%
+      mutate( 
+        period = zoo::as.yearmon( period) ,
+        value = as.integer( value ) / 1000 
+        )
+  
+    # glimpse(data)
+    
+```
+
+
+## Plot
+
+```{r  plot }
+#And, create the graph
+  ggplot( data = data , aes( x = period, y=value, 
+                                  group=categoryOptionCombo, 
+                             color=categoryOptionCombo) 
+          ) + 
+    geom_line() + 
+    geom_point() + 
+    labs(x = "Year", y = "Number of cases (thousands)" ,
+         title = "Malaria cases, Kenya " ,
+         caption = 'Source: hisp.kenya' ) + 
+    theme_minimal() +
+    theme( axis.text.x = element_text(angle = 90, hjust = 1) ) +
+    facet_wrap( ~dataElement , nrow = 2 , labeller = label_wrap_gen(90)  )
+
+# stopTime<-Sys.time() 
+```
