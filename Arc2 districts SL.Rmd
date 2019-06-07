@@ -1,0 +1,242 @@
+---
+title: "Untitled"
+author: "jp"
+date: "6/5/2019"
+output: html_document
+params:
+  origin: Sierra Leone Demo
+  origin_login_file: sierra leone
+  destination_login_file: aws_sierra
+  cache: FALSE
+---
+# Setup 
+
+load libraries...
+
+```{r packages, echo = TRUE, results='hold', message=FALSE }
+
+# list of required packages
+    package.list = c("rlist", "knitr", "kableExtra", "xts", "leaflet", "RColorBrewer", "DT", "dygraphs", "httr", "jsonlite", "XML", "assertthat", "lubridate", "scales", "RcppRoll", "zoo", "gridExtra", "futile.logger", "tidyverse" )
+
+# Function to test if package is installed 
+    pkgTest <- function( package.list = package.list ){
+        
+        missing.packages = setdiff( package.list , rownames(installed.packages())) 
+        if ( length( missing.packages ) > 0 ) install.packages( missing.packages ) 
+    }
+
+
+# Test if packages loaded
+    pkgTest( package.list )
+
+# load the packages
+    lapply( package.list, suppressMessages( require ) , character.only = TRUE)
+
+
+knitr::opts_chunk$set( echo = params$echo ,
+                       fig.width =  8, 
+                       # knitr.table.format = "html" ,
+                       cache = params$cache # TRUE for testing; FALSE for production
+                       )
+
+```
+
+and functions...
+
+```{r sources }
+source('../HMIS/DHIS2/dhis2-data-munging/bootstrap/bootstrap_functions.R')
+
+source('../HMIS/DHIS2/dhis2_functions.R')
+
+origin.folder = paste0( params$origin , "/"  )
+
+
+ # login shortcuts
+login_destination = function(){
+    source( 
+    paste0( origin.folder, 
+            tolower( params$destination_login_file ) , "_login" )
+    )
+
+  loginDHIS2( baseurl, username, password)
+}
+
+login_destination()
+```
+
+Open Arc2 file and filter to SL
+
+```{r}
+      arc2_adm2_file =  "arc_adm2_rainfall.rds"  
+
+       arc2_adm2 = read_rds( arc2_adm2_file )
+       
+       glimpse( arc2_adm2 )
+       
+       arc2_adm2.sl = arc2_adm2 %>% filter( NAME_0 %in% "Sierra Leone" ) %>%
+         rename( districts = NAME_2 )
+
+
+```
+
+Get list of districts in ARC2 file
+
+```{r}
+
+   arc2.districts = arc2_adm2.sl %>% count( districts ) %>% select( -n )
+
+    arc2.districts
+    
+```
+
+Open list of SL districts
+
+```{r}
+ meta_data_file = paste0( params$origin , "/" ,
+                           params$origin , "_metadata.rds" ) 
+
+  if ( file.exists( meta_data_file) ){
+   
+      md = read_rds( meta_data_file )
+  }
+
+ district.level = md$organisationUnitLevels %>% filter( displayName %in% 'District' ) %>% pull(level )
+
+ districts = md$organisationUnits %>%
+   filter( level %in% district.level ) %>%
+   select( id, name ) %>%
+   rename( districts = name )
+ 
+ districts
+
+```
+
+Link district names 
+
+```{r}
+
+ arc2.districts %>% left_join( districts , by = "districts")
+```
+
+Show unmatched
+
+```{r}
+ arc2.districts %>% anti_join( districts , by = "districts")
+```
+
+The arc dataset has "Western Area" instead of Western Rural and Western Urban.
+
+Now, create a data element for ARC2 
+
+```{r}
+set.seed(94005004)
+arc2.id = generateUID()
+
+arc_de = tibble( name = "ARC2 mean rainfall" , shortName = "Mean Rain",
+                 domainType = "AGGREGATE" , valueType = "NUMBER" , 
+                 aggregationType = "SUM" ,
+                 zeroIsSignificant = "true" ,
+                 id = arc2.id )
+
+
+ login_destination()
+
+ url <- paste0( baseurl , 
+                 "api/metadata?importStrategy=CREATE_AND_UPDATE&atomicMode=NONE"
+                )
+     
+
+ de.list = list( dataElements = arc_de )
+
+ post( url, de.list ) 
+  
+```
+
+
+And, a new data element group, 'NASA'
+
+<!-- TODO: FIX-- -->
+
+```{r}
+set.seed(94005005)
+degroup.id = generateUID()
+
+
+
+nasa_degp = tibble( name = "NASA" , 
+                 id = degroup.id ,
+                 dataElements = list(data.frame( id = arc2.id)) 
+                 )
+
+
+
+ login_destination()
+
+ url <- paste0( baseurl , 
+                 "api/metadata?importStrategy=CREATE_AND_UPDATE&atomicMode=NONE"
+                )
+     
+
+   degrp.list = list( dataElementGroups = nasa_degp )
+  
+  post( url, degrp.list )
+  
+```
+
+Now, prepare the dataset
+
+```{r}
+ data = arc2_adm2.sl %>% 
+  left_join( districts , by = "districts") %>%
+  filter( !is.na( id ) , !is.na( rain_mean ) ) %>%
+  rename( orgUnit = id  ) %>%
+  mutate( value = as.character( rain_mean ) ,
+          dataElement = arc2.id ,
+          # note: need to convert month to text and pad  so that always 2 characters
+          period = paste0( year, str_pad( month , 2, pad = "0")  ) ) %>%
+  select( orgUnit, dataElement ,  period , value )
+
+glimpse( data )
+```
+
+And...
+
+- After getting the data into shape, import it.
+
+```{r import_data , echo = TRUE}
+
+ 
+  url <- paste0( baseurl,
+                 "api/dataValueSets?preheatCache=false&skipExistingCheck=false" )
+  
+# Import month by month
+  periods = unique( data$period ) 
+  periods = periods[ order( periods )]
+  
+for ( i in seq_along(periods) ){ 
+  
+  print( paste( periods[i] ) )
+  
+  d_out = data %>% 
+    filter( period %in% periods[i] ) 
+  
+  p = POST( url, 
+              body = toJSON( list( dataValues = d_out ) ,
+                             auto_unbox = TRUE ) ,
+              content_type_json()
+    )
+  
+  # stop if did not import successfully
+  status = fromJSON(content(p, "text" ))$description
+  if ( !status %in% "Import process completed successfully" ){
+    print( 'Import error')
+    break
+  } 
+  
+  # results
+  print( fromJSON(content(p, "text" ))$importCount %>% data.frame() ) 
+}
+
+  
+```
+

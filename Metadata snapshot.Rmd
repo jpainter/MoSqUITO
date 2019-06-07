@@ -1,0 +1,169 @@
+---
+title: "Metadata Snapshot"
+author: "jp"
+date: "6/5/2019"
+output: html_document
+params:
+  origin: Sierra Leone Demo
+  destination_login_file: local_sierra
+  cache: FALSE
+---
+
+
+# Setup 
+
+load libraries...
+
+```{r packages, echo = TRUE, results='hold', message=FALSE }
+
+# list of required packages
+     package.list = c( 'zoo' , "tidyverse" ,"rlist", "listviewer", "DT", "knitr", "kableExtra", "xts", "leaflet", "geojsonR", "wellknown" , "geojsonio" , "sp" , "rmapshaper" , "rgeos" , "RColorBrewer", "DT", "dygraphs", "httr", "jsonlite", "XML", "assertthat", "lubridate", "anytime" , "scales", "RcppRoll", "zoo", "tsibble", "seasonal", "forecast", "stlplus",  "gridExtra", "futile.logger", "Hmisc", "pander" , "stringi", "rlang" , "htmltools" , "tidyselect" , "broom" , "ggthemes" , "readxl", "knitrProgressBar" , 'osmdata', 'sf' ,  "geojsonsf" , 'tmap', 'formattable'  )
+
+# Function to test if package is installed 
+    pkgTest <- function( package.list = package.list ){
+        
+        missing.packages = setdiff( package.list , rownames(installed.packages())) 
+        if ( length( missing.packages ) > 0 ) install.packages( missing.packages ) 
+    }
+
+
+# Test if packages loaded
+    pkgTest( package.list )
+
+# load the packages
+    lapply( package.list, suppressMessages( require ) , character.only = TRUE)
+
+
+knitr::opts_chunk$set( echo = params$echo ,
+                       fig.width =  8, 
+                       # knitr.table.format = "html" ,
+                       cache = params$cache # TRUE for testing; FALSE for production
+                       )
+
+```
+
+...functions for fetching metadata
+
+```{r sources }
+source('../HMIS/DHIS2/dhis2-data-munging/bootstrap/bootstrap_functions.R')
+
+source('../HMIS/Surv_Assessment/dhis2_functions.R')
+
+origin.folder = paste0( params$origin , "/"  )
+
+
+
+ # login shortcuts
+login_destination = function(){
+    source( 
+    paste0( origin.folder, 
+            tolower( params$destination_login_file ) , "_login" )
+    )
+
+  loginDHIS2( baseurl, username, password)
+}
+
+login_destination()
+```
+
+
+Copy the script docker-compose.yaml into its own directory and then calling `docker-compose up --build`. NB: set port so that it does not conflict with other dhis2 instances (e.g. 8091)
+
+- takes about 5 minutes
+
+# Fetch metadata from dhis2 instance ('destination')
+
+
+```{r all_meta }
+
+  meta_data_file = paste0( params$origin , "/" ,
+                           params$origin , "_metadata.rds" ) 
+
+  if ( ( !file.exists( meta_data_file) ) ){
+   
+    
+    # origin.login in to server
+    login_destination()
+
+    # there are a couple forms of metadata in the api.  This code tests the format, then gets metadata
+    # if available, use resources method
+    url = paste0( baseurl, "api" )
+    resources =  try( get( url )[['resources']] )
+    
+    # if resources available, get each one      
+    if ( !class( resources ) %in% "try-error" ){   
+        # View(resources)
+        
+        n_resources = nrow( resources )
+        pb <- progress_estimated( n_resources )
+     
+        # test:  t = get_resources( 55 )[[1]]
+    
+        md = map( 1:n_resources , ~get_resources( .x ) )
+        
+        null_meta = map_lgl(  1:n_resources ,  ~is.null( md[[.x]]) ) %>% which
+        
+        # if null, try again
+        if ( sum( null_meta ) > 0 ){ 
+            
+            md.try.again = map( null_meta , ~get_resources( .x )[[1]]  ) 
+            names( md.try.again ) = map_chr( null_meta , ~resources$plural[.x] )
+            # View( md.try.again )
+            
+            # if retry worked, update me 
+            
+            try.again.worked = map_lgl(  1:length(md.try.again) , ~!is.null( md.try.again[[.x]] ) ) %>% which
+            
+            if ( sum( try.again.worked ) > 0 ){
+                
+                for ( i in 1:length(try.again.worked ) ){
+                    
+                    md[[ null_meta[ try.again.worked[i] ] ]] = md.try.again[[ try.again.worked[i] ]]
+                }
+            }
+            
+        }
+        
+        names( md ) = map_chr( 1:n_resources , ~resources$plural[.x] )
+        
+
+    } else { # or else, get metadata as one download
+        
+        url <- paste0( baseurl, "api/metadata.json" )
+        
+        md =  get( url ) 
+    
+    }
+    
+    
+    # re-order alaphabetically to be easier to browse in View
+    md = md[ order( names(md) ) ]
+
+ 
+    
+    if ( file.exists( meta_data_file) | params$create_new  ){ 
+        
+        file.rename( meta_data_file ,
+                     paste0( meta_data_file , 
+                             format(Sys.time(), "%b%d%Y")
+                                                        )
+                     )
+    }
+         
+    if ( !file.exists( meta_data_file) ) write_rds( md, meta_data_file )
+    
+  } else {
+      
+       md = read_rds( meta_data_file )
+  }
+  
+
+  # re-order alaphabetically to be easier to browse in View
+  md = md[order(names(md))]
+  
+  # Retrieve access data 
+  date_metadata = file.info( meta_data_file )$ctime 
+  
+```
+
+Metadata downoloaded on `r format( date_metadata , '%d-%B-%Y' )
