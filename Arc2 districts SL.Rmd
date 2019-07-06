@@ -4,10 +4,12 @@ author: "jp"
 date: "6/5/2019"
 output: html_document
 params:
-  origin: Sierra Leone Demo
+  origin: Sierra Leone
   origin_login_file: sierra leone
-  destination_login_file: aws_sierra
+  destination_login_file: local_sierra_leone
   cache: FALSE
+editor_options: 
+  chunk_output_type: console
 ---
 # Setup 
 
@@ -16,7 +18,7 @@ load libraries...
 ```{r packages, echo = TRUE, results='hold', message=FALSE }
 
 # list of required packages
-    package.list = c("rlist", "knitr", "kableExtra", "xts", "leaflet", "RColorBrewer", "DT", "dygraphs", "httr", "jsonlite", "XML", "assertthat", "lubridate", "scales", "RcppRoll", "zoo", "gridExtra", "futile.logger", "tidyverse" )
+    package.list = c("rlist", "knitr", "kableExtra", "xts", "leaflet", "RColorBrewer", "DT", "dygraphs", "httr", "jsonlite", "XML", "assertthat", "lubridate", "scales", "RcppRoll", "zoo", "gridExtra", "futile.logger", "tidyverse", "anytime" )
 
 # Function to test if package is installed 
     pkgTest <- function( package.list = package.list ){
@@ -46,11 +48,10 @@ and functions...
 ```{r sources }
 source('../HMIS/DHIS2/dhis2-data-munging/bootstrap/bootstrap_functions.R')
 
-source('../HMIS/DHIS2/dhis2_functions.R')
+source('../HMIS/Surv_Assessment/dhis2_functions.R')
 
-origin.folder = paste0( params$origin , "/"  )
-
-
+origin.folder = paste0( "../HMIS/Surv_Assessment/" , 
+                        params$origin, "/" )
  # login shortcuts
 login_destination = function(){
     source( 
@@ -64,35 +65,11 @@ login_destination = function(){
 login_destination()
 ```
 
-Open Arc2 file and filter to SL
+
+Open list of SL admin boundaries
 
 ```{r}
-      arc2_adm2_file =  "arc_adm2_rainfall.rds"  
-
-       arc2_adm2 = read_rds( arc2_adm2_file )
-       
-       glimpse( arc2_adm2 )
-       
-       arc2_adm2.sl = arc2_adm2 %>% filter( NAME_0 %in% "Sierra Leone" ) %>%
-         rename( districts = NAME_2 )
-
-
-```
-
-Get list of districts in ARC2 file
-
-```{r}
-
-   arc2.districts = arc2_adm2.sl %>% count( districts ) %>% select( -n )
-
-    arc2.districts
-    
-```
-
-Open list of SL districts
-
-```{r}
- meta_data_file = paste0( params$origin , "/" ,
+ meta_data_file = paste0( origin.folder , "datasets/" ,
                            params$origin , "_metadata.rds" ) 
 
   if ( file.exists( meta_data_file) ){
@@ -104,38 +81,213 @@ Open list of SL districts
 
  districts = md$organisationUnits %>%
    filter( level %in% district.level ) %>%
-   select( id, name ) %>%
-   rename( districts = name )
+   dplyr::select( id, name ) %>%
+   rename( districts = name ) %>%
+   mutate( districts = gsub( " District" , "", districts ))
  
  districts
 
 ```
 
-Link district names 
+# Convert administrative areas to simple feature file
+
+
+```{r ous_from_metatdata }
+
+# file with org units as SF 
+  ous_file =  paste0( origin.folder , "datasets/" ,
+                           params$origin , "_ous.rds" ) 
+
+if ( file.exists( ous_file )){
+  
+  ous.sf = readRDS( ous_file )
+  
+  # test plot
+  # plot( ous.sf[, c('orgUnit.name', 'geometry')] )
+  
+} else {
+  
+  ous.sf = ous_from_metatdata( .meta = md , simplify = FALSE , SF = TRUE ) 
+  
+  saveRDS( ous.sf , ous_file )
+}
+ 
+       
+```
+
+
+# Use admin boundaries to summarise arc2 data
+
+```{r summarise_over_admin }
+
+    source = 'ARC2'
+
+    # lowest level with administrative boundaries
+    adm_level = ous.sf$level[ ous.sf$feature %in% 'Polygon' ] %>% max()
+
+
+    arc2_adm_file = paste0( "Datasets/", source, 
+                           "_adm_level", adm_level ,
+                           ".rds")
+   
+   if ( file.exists( arc2_adm_file )){ 
+     
+            arc2_adm = read_rds( arc2_adm_file )
+       
+   } else { 
+
+    source(  "Datasets/ARC_rainfall_by_adm.R")
+    
+    source.data.directory = '../ARC/data/arc/'
+
+    arc2_adm = adm_rainfall( adm = adm_level , 
+                            years = 2000:2019 ,
+                            admin.sf = ous.sf ,
+                            data.directory =  source.data.directory ,
+                            source = source )
+    
+
+
+   saveRDS( arc2_adm , 
+            file = arc2_adm_file )
+   
+   }
+   
+  glimpse( arc2_adm )
+```
+
+## Confirm all districts have data 
 
 ```{r}
 
- arc2.districts %>% left_join( districts , by = "districts")
+admins =  ous.sf %>% 
+  filter( feature %in% 'Polygon' ) 
+  # st_set_geometry(NULL) %>% 
+  # dplyr::select( orgUnit, level.name , parent_ou.name , feature , geometry ) 
+
+
+d = arc2_adm %>% inner_join( admins  ,
+                             by = 'orgUnit' )
+
+count( d, level.name )
+
+count( d, parent_ou.name )
+
 ```
 
-Show unmatched
+Lets review data values to see if the values look reasonable.  Sum over districts
 
-```{r}
- arc2.districts %>% anti_join( districts , by = "districts")
+```{r box_plot}
+
+parent = d %>% group_by( parent_ou.name, period ) %>% summarise( rain = mean( rain_mean , na.rm = T))
+
+summary( parent$rain )
+
+ggplot( parent, aes( parent_ou.name , rain ) ) + 
+  geom_boxplot() +
+  coord_flip()
+
+parent %>% filter( parent_ou.name %in% 'Kambia District') %>%
+  dplyr::select( period, rain, parent_ou.name ) %>%
+  ggplot( aes( period, rain, group = parent_ou.name )) + geom_line()
+
+# check out chiefdoms within
+d %>% filter( parent_ou.name %in% 'Kambia District') %>%
+  dplyr::select( period, rain_mean, orgUnit.name ) %>%
+  ggplot( aes( period, rain_mean, group = orgUnit.name , color = orgUnit.name)) + geom_line()
+
+# Samu Chiefdom 
+d %>% filter( orgUnit.name %in% 'Samu Chiefdom') %>%
+  dplyr::select( period, rain_mean, orgUnit.name ) %>%
+  arrange( -rain_mean )
+
+
+# ggplot( ous.sf , aes( fill = orgUnit.name ) ) + geom_sf( )
+
 ```
 
-The arc dataset has "Western Area" instead of Western Rural and Western Urban.
+# Use HF area (estimated by Voronoi) to summarise ARC2 
 
-Now, create a data element for ARC2 
+## estimate catchment areas
+```{r voronoi}
+
+hfs =  ous.sf %>% filter( feature %in% 'Point') 
+
+# convert to a multipolygon
+hfs.multipoly = st_union( hfs )
+head(hfs.multipoly)
+
+national.border = st_union( st_buffer( admins %>% filter( level == 2 ) , dist = 0)  )
+
+v <- st_voronoi( hfs.multipoly , national.border )
+
+# clip to national border
+hfc = st_intersection( st_cast(v), national.border )
+
+# test:
+plot( hfc, col = 0)  # voronoi witihin bounding box
+plot( hfs, add = TRUE )
+
+hfc.file =  "hfc_voronoi.rds"
+saveRDS( hfc , hfc.file ) 
+
+
+```
+
+## Summarise data
+
+```{r summarise_over_hfc}
+   source = 'ARC2'
+
+    adm_level = "hfc"
+    
+    arc2_hfc_file = paste0( "Datasets/", source, 
+                           "_adm_level", adm_level ,
+                           ".rds")
+   
+   if ( file.exists( arc2_hfc_file )){ 
+     
+            arc2_hfc = read_rds( arc2_adm_file )
+       
+   } else { 
+
+    source(  "Datasets/ARC_rainfall_by_adm.R")
+    
+    source.data.directory = '../ARC/data/arc/'
+
+    arc2_hfc = adm_rainfall( adm = adm_level , 
+                            years = 2000:2019 ,
+                            admin.sf = hfc ,
+                            data.directory =  source.data.directory ,
+                            source = source )
+    
+
+
+   saveRDS( arc2_hfc , 
+            file = arc2_hfc_file )
+   
+   }
+   
+  glimpse( arc2_hfc )
+```
+
+
+
+# Import
+
+Create a data element for ARC2 
 
 ```{r}
 set.seed(94005004)
 arc2.id = generateUID()
 
-arc_de = tibble( name = "ARC2 mean rainfall" , shortName = "Mean Rain",
-                 domainType = "AGGREGATE" , valueType = "NUMBER" , 
-                 aggregationType = "SUM" ,
-                 zeroIsSignificant = "true" ,
+arc_de = tibble( name = "ARC2 mean rainfall" , 
+                 shortName = "Mean Rain",
+                 domainType = "AGGREGATE" , 
+                 valueType = "NUMBER" , 
+                 aggregationType = "AVERAGE" ,
+                 categoryCombo = data.frame( id = "AkqpoipjtNc" , stringsAsFactors = FALSE) , #default_#
+                 zeroIsSignificant = TRUE ,
                  id = arc2.id )
 
 
@@ -186,26 +338,26 @@ nasa_degp = tibble( name = "NASA" ,
 Now, prepare the dataset
 
 ```{r}
- data = arc2_adm2.sl %>% 
-  left_join( districts , by = "districts") %>%
-  filter( !is.na( id ) , !is.na( rain_mean ) ) %>%
-  rename( orgUnit = id  ) %>%
+ data = arc2_adm %>% 
   mutate( value = as.character( rain_mean ) ,
-          dataElement = arc2.id ,
-          # note: need to convert month to text and pad  so that always 2 characters
-          period = paste0( year, str_pad( month , 2, pad = "0")  ) ) %>%
-  select( orgUnit, dataElement ,  period , value )
+          dataElement = arc2.id 
+          # Fixed period format (padding mnth) when creating arc2_adm, so below deprecated
+          # , year = substr( period , 1, 4 ) 
+          # , month = substr( period , 5, length(period) ) 
+          # # note: need to convert month to text and pad  so that always 2 characters
+          # , period = paste0( year, str_pad( month , 2, pad = "0")  ) 
+          ) %>%
+  dplyr::select( orgUnit, dataElement ,  period , value )
 
 glimpse( data )
 ```
 
-And...
+And then ..
 
 - After getting the data into shape, import it.
 
 ```{r import_data , echo = TRUE}
 
- 
   url <- paste0( baseurl,
                  "api/dataValueSets?preheatCache=false&skipExistingCheck=false" )
   
@@ -213,7 +365,7 @@ And...
   periods = unique( data$period ) 
   periods = periods[ order( periods )]
   
-for ( i in seq_along(periods) ){ 
+for ( i in seq_along(periods)  ){ 
   
   print( paste( periods[i] ) )
   
@@ -238,5 +390,56 @@ for ( i in seq_along(periods) ){
 }
 
   
+```
+
+# Trigger analytics
+
+
+```{r trigger_analytics }
+
+
+  login_destination()
+
+  start = Sys.time()
+  
+  url <- paste0(baseurl, "api/resourceTables/analytics" ) 
+  r <- POST(url)
+  assert_that (r$status_code == 200L )
+  
+```
+
+
+```{r waiting_to_finish , echo = FALSE, results = 'hide' }
+
+## Warning--'connection refused' happens here sometimes.  Why???
+
+completed <- FALSE
+
+start = Sys.time()
+
+cat( 'started analytics at' , as.character( ymd_hms( start ) ) )
+ 
+cat( " Waiting ")
+while ( completed == FALSE ) { 
+  
+  Sys.sleep(5)
+  
+  r = get( paste0(baseurl,"api/system/tasks/ANALYTICS_TABLE"), 
+           flatten = TRUE , .print = FALSE )
+  
+  cat( "." )
+  
+  completed <- r[ 1, "completed" ] 
+  
+}
+
+  stop = Sys.time()
+  
+ cat( 'started analytics at' , as.character( ymd_hms( start ) ) )
+ 
+ cat( 'Analytics ended' , as.character( ymd_hms( stop ) ) )
+ 
+ difftime( stop, start, units = 'mins')
+
 ```
 

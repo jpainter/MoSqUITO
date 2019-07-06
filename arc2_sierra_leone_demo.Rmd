@@ -10,9 +10,9 @@ output:
 editor_options: 
   chunk_output_type: console
 params:
-  origin: Sierra Leone Demo
-  origin_login_file: sierra leone
-  destination_login_file: local_sierra
+  origin: Sierra Leone
+  origin_login_file: Sierra Leone
+  destination_login_file: sierra_leone_local
   cache: FALSE
 ---
 
@@ -789,7 +789,7 @@ for ( i in seq_along(periods) ){
 
 loginDHIS2( baseurl, username, password)
 
-  url <- paste0(baseurl, "/api/26/resourceTables/analytics" ) 
+  url <- paste0(baseurl, "/api/resourceTables/analytics" ) 
   r <- POST(url)
   assert_that (r$status_code == 200L )
 ```

@@ -4,7 +4,7 @@ author: "jp"
 date: "6/5/2019"
 output: html_document
 params:
-  origin: Sierra Leone Demo
+  origin: Sierra Leone
   destination_login_file: local_sierra
   cache: FALSE
 ---
@@ -77,10 +77,7 @@ Copy the script docker-compose.yaml into its own directory and then calling `doc
 ```{r all_meta }
 
   meta_data_file = paste0( params$origin , "/" ,
-                           params$origin , "_metadata.rds" ) 
-
-  if ( ( !file.exists( meta_data_file) ) ){
-   
+                           "local_" , params$origin , "_metadata.rds" ) 
     
     # origin.login in to server
     login_destination()
@@ -141,7 +138,7 @@ Copy the script docker-compose.yaml into its own directory and then calling `doc
 
  
     
-    if ( file.exists( meta_data_file) | params$create_new  ){ 
+    if ( file.exists( meta_data_file)  ){ 
         
         file.rename( meta_data_file ,
                      paste0( meta_data_file , 
@@ -150,20 +147,17 @@ Copy the script docker-compose.yaml into its own directory and then calling `doc
                      )
     }
          
-    if ( !file.exists( meta_data_file) ) write_rds( md, meta_data_file )
     
-  } else {
-      
-       md = read_rds( meta_data_file )
-  }
+    # re-order alaphabetically to be easier to browse in View
+    md = md[order(names(md))]
+    
+    
+    
+   if ( !file.exists( meta_data_file) ) write_rds( md, meta_data_file )
   
-
-  # re-order alaphabetically to be easier to browse in View
-  md = md[order(names(md))]
+   date_metadata = file.info( meta_data_file )$ctime 
   
-  # Retrieve access data 
-  date_metadata = file.info( meta_data_file )$ctime 
   
 ```
 
-Metadata downoloaded on `r format( date_metadata , '%d-%B-%Y' )
+Metadata downoloaded on `r format( date_metadata , '%d-%B-%Y' )`
