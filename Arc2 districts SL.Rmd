@@ -214,19 +214,20 @@ d %>% filter( orgUnit.name %in% 'Samu Chiefdom') %>%
 hfs =  ous.sf %>% filter( feature %in% 'Point') 
 
 # convert to a multipolygon
-hfs.multipoly = st_union( hfs )
-head(hfs.multipoly)
+hfs.multipoly = st_union( hfs, by_feature = TRUE )
+head( hfs.multipoly )
+glimpse( hfs.multipoly )
 
 national.border = st_union( st_buffer( admins %>% filter( level == 2 ) , dist = 0)  )
 
 v <- st_voronoi( hfs.multipoly , national.border )
 
 # clip to national border
-hfc = st_intersection( st_cast(v), national.border )
+hfc = st_intersection( v , national.border ) # st_cast(v)
 
 # test:
-plot( hfc, col = 0)  # voronoi witihin bounding box
-plot( hfs, add = TRUE )
+# plot( hfc, col = 0)  # voronoi witihin bounding box
+# plot( hfs, add = TRUE )
 
 hfc.file =  "hfc_voronoi.rds"
 saveRDS( hfc , hfc.file ) 

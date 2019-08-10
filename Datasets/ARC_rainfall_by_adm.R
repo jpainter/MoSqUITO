@@ -52,7 +52,22 @@ adm_rainfall = function( adm = 3 , years = 2018:2018, admin.sf = ous ,
            # TODO use bounding box to reduce d before converting to SF
            # do conversion to sf and transform outside the function
            # separate function to create matrix of over...
-            arc_period = d %>% st_as_sf %>% st_crop( . , st_bbox(admin.sf) )
+           
+           ## Create the clipping polygon
+             # CP <- extent( st_bbox(admin.sf)[c(1,3,2,4)] ) 
+             # out <- crop( d, CP )  # does not seem to work on spatialPolygonDataFrame
+             # 
+             # # other method at, https://stackoverflow.com/questions/13982773/crop-for-spatialpolygonsdataframe , not working with spdf
+             # ## Clip the raster map
+             # CP <- as( CP , "SpatialPolygons")
+             # proj4string(CP) <- CRS( st_crs( admin.sf )$proj4string )
+             # 
+             # ## Clip the map
+             # out <- rgeos::gIntersection( d , CP, byid=TRUE )
+           
+           cat( "converting data file to simple feature map\n")
+            arc_period = d %>% st_as_sf 
+            # %>% st_crop( st_bbox(admin.sf) )
             
             # d is SpatialGridDataFrame with 601,551 rows (1 per pixel) and 32 columuns,
             # one for each day of the month, and the monthly total
@@ -60,13 +75,13 @@ adm_rainfall = function( adm = 3 , years = 2018:2018, admin.sf = ous ,
             # arc_period is an SF data.frame with rows = number of points with bbox created by admin.sf, 
             # and and 32 columuns,one for each day of the month, and the monthly total
 
+            cat( "ensuring same CRS\n")
             # convert to same crs as adm map
-            # if ( is.na( projection( admin.sf ))){
-            #   admin.sf = st_transform( admin.sf , crs = projection( arc_period ) )
-            # } else {
-            #   arc_period = st_transform( arc_period , crs = projection( admin.sf ) )
-            # }
+            if ( !identical( st_crs( admin.sf ) , st_crs(arc_period ) ) ){
+              admin.sf = st_transform( admin.sf , crs = st_crs( arc_period ) )
+            }
             
+            cat( "Determining which pixels go with with admin unit\n")
             # arc_over_admins = over(  ous, arc_period , returnList = TRUE)
             arc_over_admins = st_intersects( admin.sf , arc_period , sparse = FALSE )
             # result is matrix with rows = number of features in admin , and cols = 
@@ -99,6 +114,7 @@ adm_rainfall = function( adm = 3 , years = 2018:2018, admin.sf = ous ,
                 dplyr::select( month ) %>% st_set_geometry(NULL) %>% as.matrix()
             }
             
+            cat( "calculating cross product of arc_over_adms with d.matrix\n")
             # matrix multiplication to get mean monthly value for all pixels in each admin
             # TODO speed up by reducing d before cross product
             arc_admins_period = arc_over_admins %*% d.matrix
